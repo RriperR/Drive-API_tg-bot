@@ -1,6 +1,9 @@
 # Используем официальный образ Python
 FROM python:3.9-slim
 
+# Установка ffmpeg
+RUN apt-get update && apt-get install -y ffmpeg
+
 # Устанавливаем рабочую директорию
 WORKDIR /app
 

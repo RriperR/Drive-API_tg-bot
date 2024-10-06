@@ -5,6 +5,4 @@ services:
     build:
       context: .
     container_name: bot
-    volumes:
-      - ./bot.py:/bot.py
     restart: always

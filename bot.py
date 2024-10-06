@@ -1,74 +1,98 @@
 import telebot
+from googleapiclient.discovery import build
+from fpdf import FPDF
 import os
-from pydub import AudioSegment
-from pydrive.auth import GoogleAuth
-from pydrive.drive import GoogleDrive
-from datetime import datetime
+from io import BytesIO
+from google.oauth2 import service_account
 from dotenv import load_dotenv
+from googleapiclient.http import MediaIoBaseUpload
 
-bot = telebot.TeleBot(os.environ.get('BOT_TOKEN'))
+# Настройка Google Drive API
+SCOPES = ['https://www.googleapis.com/auth/drive']
+SERVICE_ACCOUNT_FILE = 'q-bot.json'  # Укажите ваш JSON-файл с сервисным аккаунтом
+credentials = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+drive_service = build('drive', 'v3', credentials=credentials)
 
-# Авторизация и создание объекта Google Drive
-gauth = GoogleAuth()
-gauth.LocalWebserverAuth()  # Аутентификация пользователя в браузере
-drive = GoogleDrive(gauth)
+# Инициализация бота
+load_dotenv()
+TELEGRAM_BOT_TOKEN = os.environ.get('BOT_TOKEN')
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
-
-# Старт бота
 @bot.message_handler(commands=['start'])
-def main(message):
-    welcome_text = 'Привет! Отправьте мне голосовое сообщение, и я сохраню его в Google Drive.'
-    bot.send_message(message.chat.id, welcome_text)
+def start(message):
+    chat_id = message.chat.id
+    bot.send_message(chat_id, "Ассалам Алейкум!")
 
 
-# Функция для создания папки на Google Drive с текущей датой и временем
-def create_drive_folder():
-    folder_name = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    folder_metadata = {'title': folder_name, 'mimeType': 'application/vnd.google-apps.folder'}
-    folder = drive.CreateFile(folder_metadata)
-    folder.Upload()
-    return folder['id']
+# Функция для создания PDF с фото и текстом
+def create_pdf(text, image_data):
+    pdf = FPDF()
+    pdf.add_page()
+
+    # Добавляем текст в PDF
+    pdf.set_font("Arial", size=12)
+    pdf.multi_cell(0, 10, text)
+    pdf.ln(10)
+
+    # Сохраняем фото временно в памяти и добавляем его в PDF
+    with open("temp_image.jpg", "wb") as temp_img:
+        temp_img.write(image_data)
+    pdf.image("temp_image.jpg", x=10, y=pdf.get_y() + 10, w=100)
+
+    # Создаем объект BytesIO для хранения PDF в памяти
+    pdf_output = BytesIO()
+    pdf_output.write(pdf.output(dest='S').encode('latin1'))  # Выводим PDF в объект BytesIO
+    pdf_output.seek(0)  # Возвращаем указатель в начало файла
+    os.remove("temp_image.jpg")  # Удаляем временный файл изображения
+
+    return pdf_output
 
 
-# Функция для загрузки файла на Google Drive
-def upload_file_to_drive(file_name, file_path, folder_id):
-    file_drive = drive.CreateFile({'title': file_name, 'parents': [{'id': folder_id}]})
-    file_drive.SetContentFile(file_path)
-    file_drive.Upload()
+
+# Функция для загрузки PDF на Google Диск
+def upload_to_google_drive(file_data, file_name, folder_id='1G-Db6gF7aGppr4U1mfJR6blYbQYyRAVl'):
+    file_metadata = {
+        'name': file_name,
+        'mimeType': 'application/pdf',
+    }
+    if folder_id:
+        file_metadata['parents'] = [folder_id]
+
+    media = MediaIoBaseUpload(file_data, mimetype='application/pdf', resumable=True)
+
+    try:
+        file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+        return file.get("id")
+    except Exception as e:
+        raise e
 
 
-# Обработка и отправка голосового сообщения
-@bot.message_handler(content_types=['voice'])
-def get_voice(message):
-    # Получение и скачивание голосового файла
-    file_info = bot.get_file(message.voice.file_id)
+# Обработчик получения фото и сохранения его на Google Диск в PDF
+@bot.message_handler(content_types=['photo'])
+def handle_photo(message):
+    chat_id = message.chat.id
+
+    # Получаем file_id фото и скачиваем его
+    photo = message.photo[-1]
+    file_info = bot.get_file(photo.file_id)
     downloaded_file = bot.download_file(file_info.file_path)
 
-    # Сохранение голосового сообщения в формате .ogg
-    voice_file_name = "voice_message.ogg"
-    with open(voice_file_name, "wb") as new_file:
-        new_file.write(downloaded_file)
+    # Текст, который будет добавлен в PDF
+    text = f"Photo from user {message.from_user.username or chat_id}"
 
-    # Конвертация в формат WAV (при необходимости)
-    audio = AudioSegment.from_ogg(voice_file_name)
-    wav_file_name = "voice_message.wav"
-    audio.export(wav_file_name, format="wav")
+    # Имя файла PDF
+    file_name = f"{chat_id}_photo.pdf"
 
-    # Создание папки на Google Drive и загрузка оригинального аудиофайла
-    folder_id = create_drive_folder()
-    upload_file_to_drive(voice_file_name, voice_file_name, folder_id)
+    # Создаем PDF с фото и текстом
+    pdf_file = create_pdf(text, downloaded_file)
 
-    # Отправка подтверждения пользователю
-    bot.send_message(message.chat.id, "Ваше голосовое сообщение сохранено на Google Drive.")
+    # Загружаем PDF на Google Диск
+    try:
+        file_id = upload_to_google_drive(pdf_file, file_name)
+        bot.send_message(chat_id, "Ваше фото и текст успешно сохранены на Google Диске в формате PDF!")
+    except Exception as e:
+        bot.send_message(chat_id, f"Не удалось загрузить PDF на Google Диск: {e}")
 
-    # Удаление временных файлов с локального компьютера
-    os.remove(voice_file_name)
-    os.remove(wav_file_name)
-
-
-@bot.message_handler(func=lambda message: True)
-def echo_all(message):
-    bot.send_message(message.chat.id, "Пожалуйста, отправьте голосовое сообщение.")
-
+    pdf_file.close()  # Закрываем буфер памяти после загрузки
 
 bot.polling(none_stop=True)
